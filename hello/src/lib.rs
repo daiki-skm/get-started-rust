@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 pub struct ThreadPool {
   workers: Vec<Worker>,
-  sender: mpsc::Sender<Job>,
+  sender: mpsc::Sender<Message>,
 }
 
 trait FnBox {
@@ -46,30 +46,69 @@ impl ThreadPool {
   {
     let job = Box::new(f);
 
-    self.sender.send(job).unwrap();
+    self.sender.send(Message::NewJob(job)).unwrap();
+  }
+}
+
+impl Drop for ThreadPool {
+  fn drop(&mut self) {
+      println!("Sending terminate message to all workers.");
+
+      for _ in &mut self.workers {
+          self.sender.send(Message::Terminate).unwrap();
+      }
+
+      // 全ワーカーを閉じます
+      println!("Shutting down all workers.");
+
+      for worker in &mut self.workers {
+          // ワーカー{}を閉じます
+          println!("Shutting down worker {}", worker.id);
+
+          if let Some(thread) = worker.thread.take() {
+              thread.join().unwrap();
+          }
+      }
   }
 }
 
 struct Worker {
-  id: usize,
-  thread: thread::JoinHandle<()>,
+    id: usize,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Worker {
-  fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
-    let thread = thread::spawn(move || {
-        loop {
-            let job = receiver.lock().unwrap().recv().unwrap();
+  fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Message>>>) ->
+      Worker {
 
-            println!("Worker {} got a job; executing.", id);
+      let thread = thread::spawn(move ||{
+          loop {
+              let message = receiver.lock().unwrap().recv().unwrap();
 
-            job.call_box();
-        }
-    });
+              match message {
+                  Message::NewJob(job) => {
+                      println!("Worker {} got a job; executing.", id);
 
-    Worker {
-        id,
-        thread,
-    }
+                      job.call_box();
+                  },
+                  Message::Terminate => {
+                      // ワーカー{}は停止するよう指示された
+                      println!("Worker {} was told to terminate.", id);
+
+                      break;
+                  },
+              }
+          }
+      });
+
+      Worker {
+          id,
+          thread: Some(thread),
+      }
   }
+}
+
+enum Message {
+    NewJob(Job),
+    Terminate,
 }
